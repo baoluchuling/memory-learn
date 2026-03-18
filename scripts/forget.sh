@@ -3,32 +3,12 @@
 # Usage: bash forget.sh [--id <filename>] [keyword]
 set -euo pipefail
 
-detect_cli() {
-    if [[ "${CLAUDE_CLI:-}" == "codex" ]] || [[ -n "${CODEX_SESSION_ID:-}" ]]; then
-        echo "codex"
-    else
-        echo "claude"
-    fi
-}
+source "$(dirname "$0")/common.sh"
 
-get_memory_dir() {
-    local cwd="${CLAUDE_WORKING_DIRECTORY:-$(pwd)}"
-    local cli
-    cli=$(detect_cli)
-    local base
+# ============================================================
+# Incremental index removal
+# ============================================================
 
-    if [[ "$cli" == "codex" ]]; then
-        base="$HOME/.codex/projects"
-    else
-        base="$HOME/.claude/projects"
-    fi
-
-    local hash
-    hash=$(printf '%s' "$cwd" | sed 's|/|-|g')
-    echo "$base/-${hash}/memory"
-}
-
-# Remove a single entry from MEMORY.md by filename reference
 remove_from_index() {
     local memory_dir="$1"
     local filename="$2"
@@ -36,11 +16,10 @@ remove_from_index() {
 
     [[ ! -f "$memory_md" ]] && return
 
-    # Delete lines containing the filename (the markdown link)
-    # Use grep -v instead of sed to avoid escaping issues with special chars in filenames
+    # Remove lines referencing this filename
     local tmpfile
     tmpfile=$(mktemp)
-    grep -v "($filename)" "$memory_md" > "$tmpfile" || true
+    grep -v "(${filename})" "$memory_md" > "$tmpfile" || true
     mv "$tmpfile" "$memory_md"
 }
 
@@ -60,6 +39,10 @@ main() {
                 ;;
             --help|-h)
                 echo "Usage: forget.sh [--id <filename>] [keyword]"
+                echo ""
+                echo "Examples:"
+                echo "  forget.sh \"API\"          # Delete memories matching 'API'"
+                echo "  forget.sh --id file.md   # Delete specific file"
                 exit 0
                 ;;
             *)
@@ -77,12 +60,13 @@ main() {
         exit 0
     fi
 
-    # Delete by specific ID (filename)
+    # Delete by specific filename
     if [[ -n "$target_id" ]]; then
         local target_path="$memory_dir/$target_id"
         if [[ -f "$target_path" ]]; then
             local name
-            name=$(sed -n '/^---$/,/^---$/{ /^name:/{ s/^name: *//; p; q; } }' "$target_path" 2>/dev/null || echo "$target_id")
+            name=$(get_field "$target_path" "name")
+            [[ -z "$name" ]] && name="$target_id"
             rm -f "$target_path"
             remove_from_index "$memory_dir" "$target_id"
             echo "✅ Deleted: $name"
@@ -94,7 +78,7 @@ main() {
         return
     fi
 
-    # Delete by keyword search
+    # Delete by keyword
     if [[ -z "$keyword" ]]; then
         echo "Usage: forget.sh [--id <filename>] [keyword]"
         echo ""
@@ -107,7 +91,6 @@ main() {
     local lower_keyword
     lower_keyword=$(printf '%s' "$keyword" | tr '[:upper:]' '[:lower:]')
 
-    # Find matching files
     local matches=()
     local match_names=()
 
@@ -115,12 +98,14 @@ main() {
         [[ "$(basename "$f")" == "MEMORY.md" ]] && continue
         [[ ! -f "$f" ]] && continue
 
-        local name body lower_content
-        name=$(sed -n '/^---$/,/^---$/{ /^name:/{ s/^name: *//; p; q; } }' "$f" 2>/dev/null || echo "")
-        body=$(awk 'BEGIN{c=0} /^---$/{c++; next} c>=2{print}' "$f")
-        lower_content=$(printf '%s %s' "$name" "$body" | tr '[:upper:]' '[:lower:]')
+        local name body tags
+        name=$(get_field "$f" "name")
+        body=$(get_body "$f")
+        tags=$(get_tags "$f")
+        local searchable
+        searchable=$(printf '%s %s %s' "$name" "$body" "$tags" | tr '[:upper:]' '[:lower:]')
 
-        if [[ "$lower_content" == *"$lower_keyword"* ]]; then
+        if [[ "$searchable" == *"$lower_keyword"* ]]; then
             matches+=("$f")
             match_names+=("$name")
         fi
@@ -140,7 +125,7 @@ main() {
         printf "     📄 %s\n\n" "$(basename "${matches[$i]}")"
     done
 
-    # Delete all matches (file + index entry)
+    # Delete all matches
     for f in "${matches[@]}"; do
         local fname
         fname=$(basename "$f")

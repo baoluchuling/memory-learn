@@ -1,43 +1,15 @@
 #!/bin/bash
-# deduplicate.sh — Detect and report duplicate/similar memories
+# deduplicate.sh — Detect duplicate/similar memories
 # Usage: bash deduplicate.sh [--threshold N]
 set -euo pipefail
 
-detect_cli() {
-    if [[ "${CLAUDE_CLI:-}" == "codex" ]] || [[ -n "${CODEX_SESSION_ID:-}" ]]; then
-        echo "codex"
-    else
-        echo "claude"
-    fi
-}
+source "$(dirname "$0")/common.sh"
 
-get_memory_dir() {
-    local cwd="${CLAUDE_WORKING_DIRECTORY:-$(pwd)}"
-    local cli
-    cli=$(detect_cli)
-    local base
-
-    if [[ "$cli" == "codex" ]]; then
-        base="$HOME/.codex/projects"
-    else
-        base="$HOME/.claude/projects"
-    fi
-
-    local hash
-    hash=$(printf '%s' "$cwd" | sed 's|/|-|g')
-    echo "$base/-${hash}/memory"
-}
-
-# ============================================================
-# Similarity Calculation
-# ============================================================
-
-# Word-overlap similarity (0-100)
+# Word-overlap similarity (Dice coefficient, 0-100)
 similarity() {
     local text1="$1"
     local text2="$2"
 
-    # Normalize: lowercase, extract words > 2 chars
     local words1 words2
     words1=$(printf '%s' "$text1" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | awk 'length>2' | sort -u)
     words2=$(printf '%s' "$text2" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '\n' | awk 'length>2' | sort -u)
@@ -47,12 +19,8 @@ similarity() {
         return
     fi
 
-    # Count common words
-    local common
+    local common total1 total2
     common=$(comm -12 <(echo "$words1") <(echo "$words2") | wc -l | tr -d ' ')
-
-    # Count total unique words
-    local total1 total2
     total1=$(echo "$words1" | wc -l | tr -d ' ')
     total2=$(echo "$words2" | wc -l | tr -d ' ')
 
@@ -62,13 +30,11 @@ similarity() {
         return
     fi
 
-    # Dice coefficient: 2*common / (count1 + count2) * 100
-    echo $(( common * 200 / total ))
+    # Cap at 100
+    local score=$(( common * 200 / total ))
+    if (( score > 100 )); then score=100; fi
+    echo "$score"
 }
-
-# ============================================================
-# Main
-# ============================================================
 
 main() {
     local threshold=60
@@ -83,9 +49,7 @@ main() {
                 echo "Usage: deduplicate.sh [--threshold N] (default: 60)"
                 exit 0
                 ;;
-            *)
-                shift
-                ;;
+            *)  shift ;;
         esac
     done
 
@@ -97,34 +61,25 @@ main() {
         exit 0
     fi
 
-    # Collect all memory files
-    local files=()
-    local names=()
-    local bodies=()
+    local files=() names=() bodies=()
 
     for f in "$memory_dir"/*.md; do
         [[ "$(basename "$f")" == "MEMORY.md" ]] && continue
         [[ ! -f "$f" ]] && continue
 
         files+=("$f")
-
-        local name
-        name=$(sed -n '/^---$/,/^---$/{ /^name:/{ s/^name: *//; p; q; } }' "$f" 2>/dev/null || echo "$(basename "$f")")
-        names+=("$name")
-
-        local body
-        body=$(awk 'BEGIN{c=0} /^---$/{c++; next} c>=2{print}' "$f" | tr '\n' ' ')
-        bodies+=("$body")
+        names+=("$(get_field "$f" "name")")
+        bodies+=("$(get_body "$f" | tr '\n' ' ')")
     done
 
     local count=${#files[@]}
     if (( count < 2 )); then
-        echo "📭 Need at least 2 memories to check for duplicates (found: $count)"
+        echo "📭 Need at least 2 memories to check (found: $count)"
         exit 0
     fi
 
     echo ""
-    echo "🔍 Checking $count memories for duplicates (threshold: ${threshold}%)"
+    echo "🔍 Checking $count memories (threshold: ${threshold}%)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     local found=0
@@ -153,13 +108,11 @@ main() {
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
     if (( found == 0 )); then
         echo "✅ No duplicates found"
     else
         echo "⚠️  Found $found similar pair(s)"
     fi
-
     echo "📍 Location: $memory_dir"
 }
 

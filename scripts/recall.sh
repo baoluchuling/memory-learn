@@ -1,84 +1,67 @@
 #!/bin/bash
 # recall.sh — View and search project memories
-# Usage: bash recall.sh [--type <type>] [keyword]
+# Usage: bash recall.sh [--type <type>] [--tag <tag>] [keyword ...]
 set -euo pipefail
 
-detect_cli() {
-    if [[ "${CLAUDE_CLI:-}" == "codex" ]] || [[ -n "${CODEX_SESSION_ID:-}" ]]; then
-        echo "codex"
-    else
-        echo "claude"
-    fi
-}
-
-get_memory_dir() {
-    local cwd="${CLAUDE_WORKING_DIRECTORY:-$(pwd)}"
-    local cli
-    cli=$(detect_cli)
-    local base
-
-    if [[ "$cli" == "codex" ]]; then
-        base="$HOME/.codex/projects"
-    else
-        base="$HOME/.claude/projects"
-    fi
-
-    local hash
-    hash=$(printf '%s' "$cwd" | sed 's|/|-|g')
-    echo "$base/-${hash}/memory"
-}
+source "$(dirname "$0")/common.sh"
 
 # ============================================================
-# Display Functions
+# Display
 # ============================================================
 
 show_entry() {
     local file="$1"
-    local keyword="${2:-}"
+    shift
+    local keywords=("$@")
 
     local fname
     fname=$(basename "$file")
-    [[ "$fname" == "MEMORY.md" ]] && return
+    [[ "$fname" == "MEMORY.md" ]] && return 1
 
-    # Extract frontmatter fields
-    local name type
-    name=$(sed -n '/^---$/,/^---$/{ /^name:/{ s/^name: *//; p; q; } }' "$file" 2>/dev/null || echo "$fname")
-    type=$(sed -n '/^---$/,/^---$/{ /^type:/{ s/^type: *//; p; q; } }' "$file" 2>/dev/null || echo "unknown")
+    local name type tags body created
+    name=$(get_field "$file" "name")
+    type=$(get_field "$file" "type")
+    tags=$(get_field "$file" "tags")
+    created=$(get_field "$file" "created")
+    body=$(get_body "$file")
 
-    # Extract body (after second ---)
-    local body
-    body=$(awk 'BEGIN{c=0} /^---$/{c++; next} c>=2{print}' "$file" | sed '/^$/d')
+    [[ -z "$name" ]] && name="$fname"
 
-    # If keyword specified, check if entry matches
-    if [[ -n "$keyword" ]]; then
-        local lower_keyword lower_name lower_body
-        lower_keyword=$(printf '%s' "$keyword" | tr '[:upper:]' '[:lower:]')
-        lower_name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
-        lower_body=$(printf '%s' "$body" | tr '[:upper:]' '[:lower:]')
-
-        if [[ "$lower_name" != *"$lower_keyword"* ]] && [[ "$lower_body" != *"$lower_keyword"* ]]; then
-            return 1
-        fi
+    # Multi-keyword matching: ALL keywords must match somewhere
+    if (( ${#keywords[@]} > 0 )); then
+        local searchable
+        searchable=$(printf '%s %s %s %s' "$name" "$body" "$tags" "$fname" | tr '[:upper:]' '[:lower:]')
+        for kw in "${keywords[@]}"; do
+            local lower_kw
+            lower_kw=$(printf '%s' "$kw" | tr '[:upper:]' '[:lower:]')
+            if [[ "$searchable" != *"$lower_kw"* ]]; then
+                return 1
+            fi
+        done
     fi
 
-    # Map native type to display label
+    # Display label
     local label
-    case "$type" in
-        feedback)  label="rule" ;;
-        user)      label="preference" ;;
-        project)
-            if [[ "$fname" == workflow_* ]]; then
-                label="workflow"
-            else
-                label="pattern"
-            fi
-            ;;
-        *)         label="$type" ;;
-    esac
+    label=$(type_from_filename "$fname")
 
     printf "  [%s] %s\n" "$label" "$name"
     if [[ -n "$body" ]]; then
-        printf "         %s\n" "$body"
+        # Indent body, max 2 lines
+        local line_count=0
+        while IFS= read -r line; do
+            (( line_count++ ))
+            if (( line_count > 2 )); then
+                printf "         ...\n"
+                break
+            fi
+            printf "         %s\n" "$line"
+        done <<< "$body"
+    fi
+    if [[ -n "$tags" ]]; then
+        printf "         🏷️  %s\n" "$tags"
+    fi
+    if [[ -n "$created" ]]; then
+        printf "         📅 %s\n" "$created"
     fi
     printf "         📄 %s\n\n" "$fname"
     return 0
@@ -90,7 +73,8 @@ show_entry() {
 
 main() {
     local filter_type=""
-    local keyword=""
+    local filter_tag=""
+    local keywords=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -98,12 +82,22 @@ main() {
                 filter_type="$2"
                 shift 2
                 ;;
+            --tag)
+                filter_tag="$2"
+                shift 2
+                ;;
             --help|-h)
-                echo "Usage: recall.sh [--type pattern|preference|workflow|rule] [keyword]"
+                echo "Usage: recall.sh [--type pattern|preference|workflow|rule] [--tag <tag>] [keyword ...]"
+                echo ""
+                echo "Examples:"
+                echo "  recall.sh                    # Show all"
+                echo "  recall.sh API error          # Match memories containing both 'API' AND 'error'"
+                echo "  recall.sh --type rule        # Only rules"
+                echo "  recall.sh --tag api          # Only tagged with 'api'"
                 exit 0
                 ;;
             *)
-                keyword="$1"
+                keywords+=("$1")
                 shift
                 ;;
         esac
@@ -113,80 +107,72 @@ main() {
     memory_dir=$(get_memory_dir)
 
     if [[ ! -d "$memory_dir" ]]; then
-        echo "📭 No memories found for this project."
-        echo "   Use /learn to start recording."
+        echo "📭 No memories found. Use /learn to start recording."
         exit 0
     fi
 
     # Count files
-    local count=0
+    local total=0
     for f in "$memory_dir"/*.md; do
         [[ "$(basename "$f")" == "MEMORY.md" ]] && continue
-        [[ -f "$f" ]] && (( count++ )) || true
+        [[ -f "$f" ]] && (( total++ )) || true
     done
 
-    if (( count == 0 )); then
-        echo "📭 No memories found for this project."
-        echo "   Use /learn to start recording."
+    if (( total == 0 )); then
+        echo "📭 No memories found. Use /learn to start recording."
         exit 0
     fi
 
     echo ""
-    echo "📚 Project Memories ($count entries)"
+    echo "📚 Project Memories ($total entries)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
     local shown=0
 
-    # Map filter_type to native type for filtering
-    local native_filter=""
-    case "$filter_type" in
-        pattern)    native_filter="project" ;;
-        preference) native_filter="user" ;;
-        workflow)   native_filter="project" ;;  # further filtered by filename
-        rule)       native_filter="feedback" ;;
-        "")         native_filter="" ;;
-        *)
-            echo "❌ Unknown type: $filter_type"
-            exit 1
-            ;;
-    esac
-
     for f in "$memory_dir"/*.md; do
         [[ "$(basename "$f")" == "MEMORY.md" ]] && continue
         [[ ! -f "$f" ]] && continue
 
+        local fname
+        fname=$(basename "$f")
+
         # Type filter
-        if [[ -n "$native_filter" ]]; then
-            local ftype
-            ftype=$(sed -n '/^---$/,/^---$/{ /^type:/{ s/^type: *//; p; q; } }' "$f" 2>/dev/null || echo "")
-
-            if [[ "$ftype" != "$native_filter" ]]; then
-                continue
-            fi
-
-            # Additional filename check for workflow vs pattern (both are "project" type)
-            if [[ "$filter_type" == "workflow" ]] && [[ "$(basename "$f")" != workflow_* ]]; then
-                continue
-            fi
-            if [[ "$filter_type" == "pattern" ]] && [[ "$(basename "$f")" == workflow_* ]]; then
+        if [[ -n "$filter_type" ]]; then
+            local inferred
+            inferred=$(type_from_filename "$fname")
+            if [[ "$inferred" != "$filter_type" ]]; then
                 continue
             fi
         fi
 
-        if show_entry "$f" "$keyword"; then
+        # Tag filter
+        if [[ -n "$filter_tag" ]]; then
+            local file_tags
+            file_tags=$(get_tags "$f")
+            local lower_tags lower_filter
+            lower_tags=$(printf '%s' "$file_tags" | tr '[:upper:]' '[:lower:]')
+            lower_filter=$(printf '%s' "$filter_tag" | tr '[:upper:]' '[:lower:]')
+            if [[ "$lower_tags" != *"$lower_filter"* ]]; then
+                continue
+            fi
+        fi
+
+        if show_entry "$f" "${keywords[@]+"${keywords[@]}"}"; then
             (( shown++ )) || true
         fi
     done
 
     if (( shown == 0 )); then
-        if [[ -n "$keyword" ]]; then
-            echo "  No memories matching \"$keyword\""
-        else
-            echo "  No memories of type \"$filter_type\""
-        fi
+        echo "  No matching memories."
+        if [[ -n "$filter_type" ]]; then echo "  Filter: type=$filter_type"; fi
+        if [[ -n "$filter_tag" ]]; then echo "  Filter: tag=$filter_tag"; fi
+        if (( ${#keywords[@]} > 0 )); then echo "  Keywords: ${keywords[*]}"; fi
+    else
+        echo "  Showing $shown of $total entries"
     fi
 
+    echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📍 Location: $memory_dir"
 }
