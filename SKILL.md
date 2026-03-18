@@ -11,7 +11,8 @@ description: |
   (5) /deduplicate — detect and merge similar memories
   (6) /organize — memory health report and expiration check
   (7) /rebuild — repair corrupted MEMORY.md index
-  (8) Auto-learning: after completing tasks, AI may suggest recording useful patterns
+  (8) /config — manage auto-learn settings
+  (9) Auto-learning: AI records useful patterns automatically (configurable)
 ---
 
 # Memory Learn — Persistent Learning System
@@ -70,30 +71,59 @@ bash {SKILL_DIR}/scripts/auto-organize.sh                  # Default: flag entri
 bash {SKILL_DIR}/scripts/auto-organize.sh --max-age 60     # Custom threshold
 ```
 
-Reports: type distribution, index usage, expired entries, health score, suggestions.
-
 ### `/rebuild` — Repair Index
 
 ```bash
 bash {SKILL_DIR}/scripts/rebuild.sh                        # Rebuild MEMORY.md from files
 ```
 
-Use when MEMORY.md is corrupted, out of sync, or after manual edits.
+### `/config` — Settings
 
-## Auto-Learning Behavior
-
-After completing a task, consider whether the session produced reusable knowledge.
-Ask concisely only when genuinely valuable:
-
-```
-💡 Worth remembering: [one-line description]
-   Type: [pattern/preference/workflow/rule]
-   Tags: [optional]
-   Record? [y/n]
+```bash
+bash {SKILL_DIR}/scripts/config.sh                         # Show current config
+bash {SKILL_DIR}/scripts/config.sh set auto_learn on       # Auto-record (default)
+bash {SKILL_DIR}/scripts/config.sh set auto_learn off      # Ask before recording
+bash {SKILL_DIR}/scripts/config.sh set expire_days 60      # Change expiry threshold
 ```
 
-- Respect "no" — never re-ask in the same session
-- Include context (why, not just what)
+## Auto-Learning Mode (default: ON)
+
+When `auto_learn=on`:
+
+**During session** — If you detect something worth remembering mid-conversation (user correction, preference, solved problem), record it immediately:
+
+```bash
+bash {SKILL_DIR}/scripts/learn.sh --type <type> --tags "relevant,tags" "description with context"
+```
+
+Then notify: `📝 Auto-recorded: [type] "description"`
+
+**At session end** — The Stop hook triggers. You MUST:
+1. Review the session for reusable knowledge
+2. Record anything valuable directly (don't ask)
+3. Notify user what was recorded
+
+**What to auto-record:**
+- Problem→fix patterns (include: error, root cause, solution)
+- User corrections to your approach (record as rule with reason)
+- Expressed preferences (tools, style, workflow choices)
+- Multi-step workflows that worked well
+
+**What NOT to auto-record:**
+- Simple Q&A, file reads, trivial changes
+- Task-specific details that won't apply elsewhere
+- Information already in existing memories (check first)
+
+When `auto_learn=off`: Ask before recording (old behavior).
+
+## Session-End Maintenance Hook
+
+The Stop hook also triggers lightweight maintenance:
+1. Auto-learn (above)
+2. If memory count > 30, warn about running `/deduplicate`
+3. If any memory > expire_days old, mention running `/organize`
+
+This runs automatically — no user action needed.
 
 ## Memory Recall Behavior
 
