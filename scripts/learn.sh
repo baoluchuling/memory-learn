@@ -102,71 +102,84 @@ EOF
 }
 
 # ============================================================
-# Update MEMORY.md Index
+# MEMORY.md Index — Init & Incremental Update
 # ============================================================
 
-update_memory_index() {
-    local memory_dir="$1"
-    local memory_md="$memory_dir/MEMORY.md"
-
-    # Collect all memory files (exclude MEMORY.md itself)
-    local tmpfile
-    tmpfile=$(mktemp)
-    trap "rm -f '$tmpfile'" EXIT
-
-    # Group entries by type
-    local rules="" patterns="" preferences="" workflows=""
-
-    for f in "$memory_dir"/*.md; do
-        [[ "$(basename "$f")" == "MEMORY.md" ]] && continue
-        [[ ! -f "$f" ]] && continue
-
-        local fname
-        fname=$(basename "$f")
-        # Extract name from frontmatter
-        local name
-        name=$(sed -n '/^---$/,/^---$/{ /^name:/{ s/^name: *//; p; q; } }' "$f" 2>/dev/null || echo "$fname")
-        local ftype
-        ftype=$(sed -n '/^---$/,/^---$/{ /^type:/{ s/^type: *//; p; q; } }' "$f" 2>/dev/null || echo "project")
-
-        local entry="- [${name}](${fname})"
-
-        case "$ftype" in
-            feedback)  rules="${rules}${entry}"$'\n' ;;
-            user)      preferences="${preferences}${entry}"$'\n' ;;
-            project)
-                # Distinguish pattern vs workflow by filename prefix
-                if [[ "$fname" == workflow_* ]]; then
-                    workflows="${workflows}${entry}"$'\n'
-                else
-                    patterns="${patterns}${entry}"$'\n'
-                fi
-                ;;
-        esac
-    done
-
-    # Write MEMORY.md (keep under 200 lines)
-    cat > "$memory_md" << EOF
-# Project Memory
+MEMORY_MD_TEMPLATE='# Project Memory
 
 ## Rules
-${rules:-_(none)_
-}
+_(none)_
+
 ## Preferences
-${preferences:-_(none)_
-}
+_(none)_
+
 ## Patterns
-${patterns:-_(none)_
-}
+_(none)_
+
 ## Workflows
-${workflows:-_(none)_
+_(none)_
+'
+
+# Ensure MEMORY.md exists with section headers
+ensure_memory_md() {
+    local memory_md="$1/MEMORY.md"
+    if [[ ! -f "$memory_md" ]]; then
+        printf '%s\n' "$MEMORY_MD_TEMPLATE" > "$memory_md"
+    fi
 }
-EOF
+
+# Map type → section header in MEMORY.md
+section_for_type() {
+    case "$1" in
+        rule)       echo "## Rules" ;;
+        preference) echo "## Preferences" ;;
+        pattern)    echo "## Patterns" ;;
+        workflow)   echo "## Workflows" ;;
+    esac
+}
+
+# Append one entry to the correct section in MEMORY.md
+append_to_index() {
+    local memory_dir="$1"
+    local type="$2"
+    local filename="$3"
+    local name="$4"
+
+    local memory_md="$memory_dir/MEMORY.md"
+    ensure_memory_md "$memory_dir"
+
+    local section
+    section=$(section_for_type "$type")
+    local entry="- [${name}](${filename})"
+
+    # Find the section header line number
+    local section_line
+    section_line=$(grep -n "^${section}$" "$memory_md" | head -1 | cut -d: -f1)
+
+    if [[ -z "$section_line" ]]; then
+        # Section missing — append at end
+        printf '\n%s\n%s\n' "$section" "$entry" >> "$memory_md"
+        return
+    fi
+
+    # Remove _(none)_ placeholder if present (the line right after the header)
+    local next_line=$(( section_line + 1 ))
+    local next_content
+    next_content=$(sed -n "${next_line}p" "$memory_md")
+    if [[ "$next_content" == "_(none)_" ]]; then
+        sed -i.bak "${next_line}d" "$memory_md" && rm -f "$memory_md.bak"
+    fi
+
+    # Insert entry right after the section header
+    sed -i.bak "${section_line}a\\
+${entry}" "$memory_md" && rm -f "$memory_md.bak"
 
     # Enforce 200-line limit
     local lines
-    lines=$(wc -l < "$memory_md")
+    lines=$(wc -l < "$memory_md" | tr -d ' ')
     if (( lines > 195 )); then
+        local tmpfile
+        tmpfile=$(mktemp)
         head -195 "$memory_md" > "$tmpfile"
         echo "" >> "$tmpfile"
         echo "_(truncated — $(( lines - 195 )) more lines in individual files)_" >> "$tmpfile"
@@ -219,7 +232,12 @@ main() {
     local filepath
     filepath=$(write_memory_file "$memory_dir" "$type" "$content")
 
-    update_memory_index "$memory_dir"
+    # Incremental update: only append the new entry to MEMORY.md
+    local fname
+    fname=$(basename "$filepath")
+    local display_name
+    display_name="${type}: $(echo "$content" | cut -c1-60)"
+    append_to_index "$memory_dir" "$type" "$fname" "$display_name"
 
     echo "✅ Recorded ${type} → $(basename "$filepath")"
     echo "📍 Location: $memory_dir"

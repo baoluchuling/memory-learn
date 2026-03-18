@@ -28,58 +28,20 @@ get_memory_dir() {
     echo "$base/-${hash}/memory"
 }
 
-# Source the index updater from learn.sh
-update_memory_index() {
+# Remove a single entry from MEMORY.md by filename reference
+remove_from_index() {
     local memory_dir="$1"
-    local learn_script
-    learn_script="$(dirname "$0")/learn.sh"
-
-    # Re-implement index update inline (avoid sourcing complexity)
+    local filename="$2"
     local memory_md="$memory_dir/MEMORY.md"
-    local rules="" patterns="" preferences="" workflows=""
 
-    for f in "$memory_dir"/*.md; do
-        [[ "$(basename "$f")" == "MEMORY.md" ]] && continue
-        [[ ! -f "$f" ]] && continue
+    [[ ! -f "$memory_md" ]] && return
 
-        local fname
-        fname=$(basename "$f")
-        local name
-        name=$(sed -n '/^---$/,/^---$/{ /^name:/{ s/^name: *//; p; q; } }' "$f" 2>/dev/null || echo "$fname")
-        local ftype
-        ftype=$(sed -n '/^---$/,/^---$/{ /^type:/{ s/^type: *//; p; q; } }' "$f" 2>/dev/null || echo "project")
-
-        local entry="- [${name}](${fname})"
-
-        case "$ftype" in
-            feedback)  rules="${rules}${entry}"$'\n' ;;
-            user)      preferences="${preferences}${entry}"$'\n' ;;
-            project)
-                if [[ "$fname" == workflow_* ]]; then
-                    workflows="${workflows}${entry}"$'\n'
-                else
-                    patterns="${patterns}${entry}"$'\n'
-                fi
-                ;;
-        esac
-    done
-
-    cat > "$memory_md" << EOF
-# Project Memory
-
-## Rules
-${rules:-_(none)_
-}
-## Preferences
-${preferences:-_(none)_
-}
-## Patterns
-${patterns:-_(none)_
-}
-## Workflows
-${workflows:-_(none)_
-}
-EOF
+    # Delete lines containing the filename (the markdown link)
+    # Use grep -v instead of sed to avoid escaping issues with special chars in filenames
+    local tmpfile
+    tmpfile=$(mktemp)
+    grep -v "($filename)" "$memory_md" > "$tmpfile" || true
+    mv "$tmpfile" "$memory_md"
 }
 
 # ============================================================
@@ -122,7 +84,7 @@ main() {
             local name
             name=$(sed -n '/^---$/,/^---$/{ /^name:/{ s/^name: *//; p; q; } }' "$target_path" 2>/dev/null || echo "$target_id")
             rm -f "$target_path"
-            update_memory_index "$memory_dir"
+            remove_from_index "$memory_dir" "$target_id"
             echo "✅ Deleted: $name"
             echo "📍 File: $target_id"
         else
@@ -178,12 +140,13 @@ main() {
         printf "     📄 %s\n\n" "$(basename "${matches[$i]}")"
     done
 
-    # Delete all matches
+    # Delete all matches (file + index entry)
     for f in "${matches[@]}"; do
+        local fname
+        fname=$(basename "$f")
         rm -f "$f"
+        remove_from_index "$memory_dir" "$fname"
     done
-
-    update_memory_index "$memory_dir"
 
     echo "✅ Deleted ${#matches[@]} memor(ies) matching \"$keyword\""
     echo "📍 Location: $memory_dir"
